@@ -18,29 +18,34 @@ from langchain.retrievers.document_compressors import FlashrankRerank
 from langchain.chains import RetrievalQA
 from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
+import os
+from dotenv import load_dotenv
 
+load_dotenv(verbose=True)
 
+# Set up Google Cloud credentials
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"]="allymarclinicalnotesapp-0c6d62f3197f.json"
+PROJECT_ID = os.getenv("PROJECT_ID")
+DATASET = os.getenv("DATASET")
+TABLE = os.getenv("TABLE")
+REGION = os.getenv("REGION")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME")
 
-PROJECT_ID = "allymarclinicalnotesapp"
-DATASET = 'Medical_Encounter'
-TABLE = 'Retrieval_Encounters_Synthetic_Data'
-REGION = "us-central1"
 # from langchain_google_genai import GoogleGenerativeAIEmbeddings
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"]="TRUE"
 
 # embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-exp-03-07")
-EMBEDDING_MODEL = VertexAIEmbeddings(model_name="text-embedding-004", project=PROJECT_ID, location=REGION)
+EMBEDDING_MODEL = VertexAIEmbeddings(model_name=EMBEDDING_MODEL_NAME, project=PROJECT_ID, location=REGION)
 
-vertexai.init(location= "us-central1" , project=PROJECT_ID)
+vertexai.init(location= REGION , project=PROJECT_ID)
 llm = VertexAI(model_name="gemini-2.0-flash")
 
-DEFAULT_K = 10
-DEFAULT_THRESHOLD = 0.8
+DEFAULT_K = os.getenv("DEFAULT_K")
+DEFAULT_THRESHOLD = os.getenv("DEFAULT_THRESHOLD")
 
 ## Set file-path , table name, member_id and bucket name
 table = f"{PROJECT_ID}.{DATASET}.{TABLE}"
-bucket = "dev-filestore-healthrecords"
+bucket = os.getenv("BUCKET_NAME")
 metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da082"}
 
 # Initialize the bigquery

@@ -68,7 +68,6 @@ def split_documents(document_main: str, pdf_file_path: str, pat_name: str, membe
 
     return text_splitter.split_documents(docs)
 
-print("Helper functions loaded successfully.")
 # TAMPER Query Generation
 def generate_tamper_queries(icd: str, patient_name: str) -> Dict[str, str]:
     """Generate standard TAMPER-style clinical queries."""
