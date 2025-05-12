@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
+from datetime import date
 import os
 import shutil
 from typing import List, Any, Dict, Optional, Union
@@ -83,7 +84,7 @@ class MemberRAG:
                     }
                 )
                 for _, row in df.iterrows()
-            ]
+            ] 
             self._documents = FAISS.from_documents(documents, embedding=EMBEDDING_MODEL)
             print(f">>>>>>> Documents initialized for member_id: {self.member_id}")
 
@@ -132,9 +133,10 @@ class MemberRAG:
 
     def get_relevant_docs_and_metadata(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> List[Dict[str, Any]]:
         """Get relevant documents and metadata for a given question"""
-        self.get_documents()
+        if self._documents is None:
+            self.get_documents()
         retriever = self._documents.as_retriever(k=k)
-        results = retriever.get_relevant_documents(question)
+        results = retriever.invoke(question)
         return [
             {"text": doc.page_content, "metadata": doc.metadata}
             for doc in results
@@ -143,7 +145,8 @@ class MemberRAG:
     def query(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> Union[str, Exception]:
         """Query the RAG model with a question and return the answer"""
         try:
-            self.get_documents()
+            if self._documents is None:
+                self.get_documents()
             base_retriever = self._documents.as_retriever(k=k)
             comp_retriever = ContextualCompressionRetriever(
                 base_compressor=self.compressor,
@@ -163,14 +166,14 @@ class MemberRAG:
             return RuntimeError(f"RetrievalQA failed: {e}")
         
     
-    def get_is_valid_suspect(self, icd: str, icd_description: dict) -> dict[str, list] | Exception:
-        """Get is_valid_suspect for a given ICD code and description"""
+    def get_is_valid_suspect(self, icd: str, icd_description: dict) -> str | Exception:
+        """Determine if condition is suspected today for a given ICD, using retrieved clinical evidence."""
         try:
             seen_ids = set()
             full_knowledge_seen_ids = set()
             response: dict[str, list] = {}
 
-            # Generate KG-enhanced queries
+            # Step 1: Generate knowledge graph-enhanced queries
             combined_queries = combine_queries_with_kg(
                 table=self.table,
                 member_id=self.member_id,
@@ -178,43 +181,59 @@ class MemberRAG:
                 icd_description=icd_description
             )
 
+            # Step 2: Retrieve documents and deduplicate by doc_id or content hash
             for section, data in combined_queries.items():
-                # Always go through the retriever logic
                 docs = self.get_relevant_docs_and_metadata(
                     question=data["query"],
                     k=DEFAULT_K,
                     threshold=DEFAULT_THRESHOLD
                 )
-                
+
                 unique_docs = []
                 for doc in docs:
+                    doc_id = doc['metadata'].get('doc_id') or hash(doc["text"])
                     if section == "Full_Knowledge":
-                        print(f"section: {section} >=================================")
-                        doc_id = doc['metadata'].get('doc_id') or hash(doc["text"])
                         if doc_id not in full_knowledge_seen_ids:
                             full_knowledge_seen_ids.add(doc_id)
                             unique_docs.append(doc)
                     else:
-                        print(f"section: {section} >=================================")
-                        doc_id = doc['metadata'].get('doc_id') or hash(doc["text"])
                         if doc_id not in seen_ids:
                             seen_ids.add(doc_id)
                             unique_docs.append(doc)
 
                 response[section] = unique_docs
 
-            return response
+            # Step 3: Collect all deduplicated documents
+            all_docs = {
+                doc['metadata'].get('doc_id') or hash(doc["text"]): doc
+                for section_docs in response.values()
+                for doc in section_docs
+            }
 
+
+            today_str = date.today().strftime("%B %d, %Y")
+          
+            question = (
+                f"Today is {today_str}.\n\n"
+                f"Here is the information for the patient list data along with date information.\n\n"
+                f"{all_docs}\n\n"
+                f"Would you suspect the condition '{icd_description.get('description', icd)}' today?"
+            )
+            
+            # Step 4: Query the LLM with the combined data
+            llm_response = llm.invoke(question)
+            return llm_response
+        
         except Exception as e:
             raise RuntimeError(f"Error validating suspect for member_id={self.member_id}: {e}")
 
 
 
-
-
-result = MemberRAG(member_id=metadata.get("member_id"))
+"==========================================================================================================================================="
 
 # Example usage
+result = MemberRAG(member_id=metadata.get("member_id"))
+
 print("------------------------------------------------------------------------------------------------------------------------")
 question1 = "What is the treatment plan for this patient?"
 question2 = "What is the assessment for this patient?"
@@ -274,6 +293,6 @@ icd_description =  {
         "E": """**E — Evaluation**: Progress is evaluated via **normalization of ALP**, **improved phosphate retention** (TmP/GFR), and **radiographic evidence of bone healing**[^3][^7]. Documentation may note "reduced leg bowing on X-ray" or "decreased bone pain with current regimen"[^1][^7]. In adults, stabilization of pseudofractures or improved mobility metrics (e.g., 6-minute walk test) are tracked[^7]. Persistent hypophosphatemia or complications (e.g., hyperparathyroidism) trigger reassessment of therapy[^3]. Pediatric growth curves and dentition assessments provide additional outcome measures[^1][^7].""",
         "R": """**R — Referral** : Common referrals include **nephrology** (renal complications), **endocrinology** (refractory hypophosphatemia), **orthopedics** (deformity correction), and **dentistry** (abscess prevention)[^1][^7]. Genetic counseling referrals are standard for family planning or testing asymptomatic relatives[^1][^7]. Rarely, patients with atypical presentations may be referred to metabolic bone centers for advanced diagnostics (e.g., FGF23 assays or genetic panels)[^3][^7]. Documentation typically justifies referrals (e.g., "orthopedic evaluation for worsening genu varum")[^1]."""
     }
-icd_code = "Familial Hypophosphatemia"
+icd_code = "E83.31"
 is_valid_suspect = result.get_is_valid_suspect(icd=icd_code, icd_description=icd_description)
 print("Is valid suspect:", is_valid_suspect)
