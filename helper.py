@@ -20,17 +20,6 @@ def df_from_bigquery(table: str = None, custom_sql: str = None) -> pd.DataFrame:
     query = custom_sql if custom_sql else f"SELECT * FROM `{table}`"
     return client.query(query).to_dataframe()
 
-# Get Patient Name
-def get_patient_name_by_member_id(table: str, member_id: str) -> str:
-    client = bigquery.Client()
-    query = f"""
-        SELECT patient_name
-        FROM `{table}`
-        WHERE member_id = '{member_id}'
-        LIMIT 1
-    """
-    df = client.query(query).to_dataframe()
-    return df['patient_name'].iloc[0] if not df.empty else None
 
 def get_file(bucket_name: str, file_path: str, local_file_name: str) -> str:
     """Download a file from a GCS bucket and save it locally."""
@@ -83,15 +72,14 @@ def generate_tamper_queries(icd: str, patient_name: str) -> Dict[str, str]:
 
 # Query-Knowledgebase Combiner
 def combine_queries_with_kg(
-    table: str,
-    member_id: str,
+    patient_name: str,
     icd: str,
     icd_description: Dict[str, str]
+
 ) -> Dict[str, Dict[str, str]]:
     """
     Combine TAMPER queries with ICD knowledge graph snippets.
     """
-    patient_name = get_patient_name_by_member_id(table, member_id)
     queries = generate_tamper_queries(icd, patient_name)
     combined = {}
 
@@ -105,7 +93,6 @@ def combine_queries_with_kg(
             "query": query,
             "knowledge_base": kg_text
         }
-
     return combined
 
 

@@ -9,7 +9,7 @@ from typing import List, Any, Dict, Optional, Union
 from retry import retry
 from pdf2image import convert_from_path
 import vertexai
-from helper import df_from_bigquery, get_file, split_documents, combine_queries_with_kg, get_patient_name_by_member_id, ocr_from_images_dict
+from helper import df_from_bigquery, get_file, split_documents, combine_queries_with_kg, ocr_from_images_dict
 from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
 from PIL import Image
 from langchain_google_community import BigQueryVectorStore
@@ -46,9 +46,12 @@ DEFAULT_THRESHOLD = os.getenv("DEFAULT_THRESHOLD")
 ## Set file-path , table name, member_id and bucket name
 table = f"{PROJECT_ID}.{DATASET}.{TABLE}"
 bucket = os.getenv("BUCKET_NAME")
-metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da082"}
 
-# Initialize the bigquery
+metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da082"}
+patient_name = "Amelia Harris"
+
+
+# Initialize the bigquery for data ingestion
 bq_store = BigQueryVectorStore(
     project_id=PROJECT_ID,
     dataset_name=DATASET,
@@ -112,9 +115,6 @@ class MemberRAG:
                 shutil.rmtree('IMG')
             except FileNotFoundError:
                 print("OCR not performed yet")
-
-            # get patient name from metadata
-            patient_name = get_patient_name_by_member_id(table=self.table, member_id=self.member_id)
 
             gcs_file_path = f"gs://{self.bucket}/{file_name}"
 
@@ -180,8 +180,7 @@ class MemberRAG:
 
             # Step 1: Generate knowledge graph-enhanced queries
             combined_queries = combine_queries_with_kg(
-                table=self.table,
-                member_id=self.member_id,
+                patient_name=patient_name,
                 icd=icd,
                 icd_description=icd_description
             )
