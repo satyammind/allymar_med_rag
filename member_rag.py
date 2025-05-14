@@ -18,8 +18,8 @@ from langchain.retrievers.document_compressors import FlashrankRerank
 from langchain.chains import RetrievalQA
 from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
-import os
 from dotenv import load_dotenv
+from PyPDF2 import PdfReader
 
 load_dotenv(verbose=True)
 
@@ -47,7 +47,7 @@ DEFAULT_THRESHOLD = os.getenv("DEFAULT_THRESHOLD")
 table = f"{PROJECT_ID}.{DATASET}.{TABLE}"
 bucket = os.getenv("BUCKET_NAME")
 
-metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da082"}
+metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da052"}
 patient_name = "Amelia Harris"
 
 
@@ -100,21 +100,32 @@ class MemberRAG:
         """Convert a PDF into a dict of images: {page_number: Image}"""
         # get file path for OCR
         pdf_path = get_file(bucket_name=bucket, file_path=file_name, local_file_name=file_name.split('/')[-1])
-        images = convert_from_path(pdf_path, dpi=dpi)
-        images_dict = {i + 1: img for i, img in enumerate(images)}
+        # images = convert_from_path(pdf_path, dpi=dpi)
+        num_pages = len(PdfReader(pdf_path).pages)
+        
+        images_dict = {}
+
+        for page_number in range(1, num_pages + 1):
+            images = convert_from_path(
+                pdf_path,
+                dpi=dpi,
+                first_page=page_number,
+                last_page=page_number
+            )
+            if images:
+                images_dict[page_number] = images[0]
+        print(">>>>>>>> PDF converted to images successfully===========================================",images_dict)
+
         return images_dict
+
 
     @retry(max_retries=5, backoff_factor=.5, verbose=True)
     def add_documents_to_index(self, images: dict, file_name: str, metadata: dict= {}) -> bool:
         """Add documents to the index."""
         try:
-            print("Performing OCR on retrieved pdf...")
+            print("Performing OCR on retrieved images...")
             document_main, _ = ocr_from_images_dict(images_dict=images)
-
-            try:
-                shutil.rmtree('IMG')
-            except FileNotFoundError:
-                print("OCR not performed yet")
+            print("OCR completed successfully.")
 
             gcs_file_path = f"gs://{self.bucket}/{file_name}"
 
@@ -136,16 +147,18 @@ class MemberRAG:
             # Raise exception with context
             raise RuntimeError(f"Failed to verify/create index for member_id={metadata.get('member_id')}: {e}")
 
+
     def get_relevant_docs_and_metadata(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> List[Dict[str, Any]]:
         """Get relevant documents and metadata for a given question"""
         if self._documents is None:
             self.get_documents()
-        retriever = self._documents.as_retriever(k=k)
+        retriever = self._documents.as_retriever(k=k, threshold=threshold),
         results = retriever.invoke(question)
         return [
             {"text": doc.page_content, "metadata": doc.metadata}
             for doc in results
         ]
+
 
     def query(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> Union[str, Exception]:
         """Query the RAG model with a question and return the answer"""
@@ -280,13 +293,13 @@ print("-------------------------------------------------------------------------
 # print("relavent_docs===============================================================================:", data6)
 
 print("------------------------------------------------------------------------------------------------------------------------")
-# # Call the pdf_to_images method
-# images = result.pdf_to_images(file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf")
+# Call the pdf_to_images method
+images = result.pdf_to_images(file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf")
 
 print("------------------------------------------------------------------------------------------------------------------------")
-# # call the add_documents_to_index method
-# success = result.add_documents_to_index(images=images, file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf", metadata=metadata)
-# print("Indexing success:", success)
+# call the add_documents_to_index method
+success = result.add_documents_to_index(images=images, file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf", metadata=metadata)
+print("Indexing success:", success)
 
 print("------------------------------------------------------------------------------------------------------------------------")
 icd_description =  {
@@ -298,5 +311,6 @@ icd_description =  {
         "R": """**R — Referral** : Common referrals include **nephrology** (renal complications), **endocrinology** (refractory hypophosphatemia), **orthopedics** (deformity correction), and **dentistry** (abscess prevention)[^1][^7]. Genetic counseling referrals are standard for family planning or testing asymptomatic relatives[^1][^7]. Rarely, patients with atypical presentations may be referred to metabolic bone centers for advanced diagnostics (e.g., FGF23 assays or genetic panels)[^3][^7]. Documentation typically justifies referrals (e.g., "orthopedic evaluation for worsening genu varum")[^1]."""
     }
 icd_code = "E83.31"
-is_valid_suspect = result.get_is_valid_suspect(icd=icd_code, icd_description=icd_description)
-print("Is valid suspect:", is_valid_suspect)
+# is_valid_suspect = result.get_is_valid_suspect(icd=icd_code, icd_description=icd_description)
+# print("Is valid suspect:", is_valid_suspect)
+

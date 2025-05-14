@@ -1,15 +1,15 @@
 # Import
+import io
 from typing import Dict
 import pandas as pd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
-from pdf2image import convert_from_path
-from paddleocr import PaddleOCR
-
 from google.cloud import bigquery, storage
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from google.cloud import vision
+
 
 # BigQuery Utilities
 def df_from_bigquery(table: str = None, custom_sql: str = None) -> pd.DataFrame:
@@ -95,21 +95,36 @@ def combine_queries_with_kg(
         }
     return combined
 
+def ocr_google_vision(img: Image.Image) -> str:
+    """Perform OCR on a PIL image using Google Vision API."""
+    # Convert PIL Image to bytes
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    image_data = img_byte_arr.getvalue()
 
-def ocr_paddle(img: Image.Image) -> str:
-    # Convert PIL Image to numpy array if necessary
-    if isinstance(img, Image.Image):
-        img = np.array(img)
-    ocr = PaddleOCR(use_angle_cls=True, lang="en")
-    result = ocr.ocr(img, cls=True)
-    return "\n".join([line[1][0] for res in result for line in res])
+    # Initialize Google Vision client
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=image_data)
+
+    # Perform text detection
+    response = client.text_detection(image=image)
+
+    # Check for errors
+    if response.error.message:
+        raise Exception(f'Google Vision API Error: {response.error.message}')
+
+    # Extract full text (first entry contains the full combined text)
+    if response.text_annotations:
+        return response.text_annotations[0].description.strip()
+    else:
+        return ""
 
 def ocr_from_images_dict(
     images_dict: Dict[int, Image.Image], max_workers: int = 1
 ) -> str:
-    """OCR all images from a dict of page_number: PIL.Image"""
+    """OCR all images from a dict of page_number: PIL.Image using Google Vision."""
     def process(page_number: int, image: Image.Image):
-        text = ocr_paddle(image)
+        text = ocr_google_vision(image)
         return (
             f"\n PAGE NUMBER:- {page_number}----------------------------------------\nDATA: {text}",
             page_number,
@@ -121,3 +136,27 @@ def ocr_from_images_dict(
     results.sort(key=lambda x: x[1])
     final_texts = [r[0] for r in results]
     return "".join(final_texts), len(final_texts)
+
+
+def detect_text_from_image(image_data):
+    """
+    Detects text in an image file using Google Vision API and returns it.
+    
+    Args:
+        image_data (bytes): The image data in bytes format.
+        
+    Returns:
+        str: The detected text.
+    """
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=image_data)
+
+    # Perform text detection
+    response = client.text_detection(image=image)
+    texts = response.text_annotations
+
+    # Extract and return the detected text (first annotation contains full text)
+    if texts:
+        return texts[0].description
+    else:
+        return ""
