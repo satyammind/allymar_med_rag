@@ -9,7 +9,7 @@ from typing import List, Any, Dict, Optional, Union
 from retry import retry
 from pdf2image import convert_from_path
 import vertexai
-from helper import df_from_bigquery, get_file, split_documents, combine_queries_with_kg, ocr_from_images_dict
+from helper import calculate_total_image_size_gb, df_from_bigquery, get_file, split_documents, combine_queries_with_kg, ocr_from_images_dict
 from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
 from PIL import Image
 from langchain_google_community import BigQueryVectorStore
@@ -40,8 +40,12 @@ EMBEDDING_MODEL = VertexAIEmbeddings(model_name=EMBEDDING_MODEL_NAME, project=PR
 vertexai.init(location= REGION , project=PROJECT_ID)
 llm = VertexAI(model_name="gemini-2.0-flash")
 
-DEFAULT_K = os.getenv("DEFAULT_K")
-DEFAULT_THRESHOLD = os.getenv("DEFAULT_THRESHOLD")
+# DEFAULT_K = os.getenv("DEFAULT_K")
+# DEFAULT_THRESHOLD = os.getenv("DEFAULT_THRESHOLD")
+
+DEFAULT_K = int(os.getenv("DEFAULT_K", 5))
+DEFAULT_THRESHOLD = float(os.getenv("DEFAULT_THRESHOLD", 0.8))
+
 
 ## Set file-path , table name, member_id and bucket name
 table = f"{PROJECT_ID}.{DATASET}.{TABLE}"
@@ -68,7 +72,7 @@ class MemberRAG:
     table: str = field(default=table)
     bucket: str = field(default=bucket)
     file_name: str = field(default="")
-    _documents: Optional[FAISS] = field(default=None, init=False)
+    _documents: Optional[Any] = None
 
     def get_documents(self):
         """Get documents from BigQuery and create a index."""
@@ -93,7 +97,7 @@ class MemberRAG:
                 )
                 for _, row in df.iterrows()
             ] 
-            self._documents = FAISS.from_documents(documents, embedding=EMBEDDING_MODEL)
+            self._documents = documents
             print(f">>>>>>> Documents initialized for member_id: {self.member_id}")
 
     def pdf_to_images(self, file_name: str, dpi: int = 300) -> Dict[int, Image.Image]:
@@ -114,7 +118,16 @@ class MemberRAG:
             )
             if images:
                 images_dict[page_number] = images[0]
+
+        # remove the downloaded file
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+        else:
+            print(f"The file {pdf_path} does not exist")
+
         print(">>>>>>>> PDF converted to images successfully===========================================",images_dict)
+        total_size_gb = calculate_total_image_size_gb(images_dict)
+        print(f"Total size of images: {total_size_gb} GB")
 
         return images_dict
 
@@ -148,24 +161,39 @@ class MemberRAG:
             raise RuntimeError(f"Failed to verify/create index for member_id={metadata.get('member_id')}: {e}")
 
 
-    def get_relevant_docs_and_metadata(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> List[Dict[str, Any]]:
-        """Get relevant documents and metadata for a given question"""
-        if self._documents is None:
-            self.get_documents()
-        retriever = self._documents.as_retriever(k=k, threshold=threshold),
-        results = retriever.invoke(question)
-        return [
-            {"text": doc.page_content, "metadata": doc.metadata}
-            for doc in results
-        ]
+    def get_relevant_docs_and_metadata(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> Union[List[Dict[str, Any]], Exception]:
+        """
+        Retrieves relevant Document objects and caches them in _documents.
+        Returns a list of dicts with text and metadata.
+        """
+        try:
+            hits = bq_store.similarity_search_with_score(
+                query=question,
+                k=k,
+                filter={"member_id": self.member_id},
+            )
+            docs: List[Document] = []
+            result: List[Dict[str, Any]] = []
+            for doc, score in hits:
+                if score >= threshold:
+                    docs.append(doc)
+                    result.append({
+                        "text": doc.page_content,
+                        "metadata": doc.metadata,
+                    })
+            # Cache Document objects for retriever
+            self._documents = docs
+            return result
+        except Exception as e:
+            return RuntimeError(
+                f"Error retrieving relevant documents for member_id={self.member_id}: {e}"
+            )
 
 
     def query(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> Union[str, Exception]:
         """Query the RAG model with a question and return the answer"""
         try:
-            if self._documents is None:
-                self.get_documents()
-            base_retriever = self._documents.as_retriever(k=k)
+            base_retriever = bq_store.as_retriever(k=k, threshold=threshold)
             comp_retriever = ContextualCompressionRetriever(
                 base_compressor=self.compressor,
                 base_retriever=base_retriever,
@@ -205,7 +233,6 @@ class MemberRAG:
                     k=DEFAULT_K,
                     threshold=DEFAULT_THRESHOLD
                 )
-
                 unique_docs = []
                 for doc in docs:
                     doc_id = doc['metadata'].get('doc_id') or hash(doc["text"])
@@ -226,7 +253,6 @@ class MemberRAG:
                 for section_docs in response.values()
                 for doc in section_docs
             }
-
 
             today_str = date.today().strftime("%B %d, %Y")
           
@@ -294,12 +320,14 @@ print("-------------------------------------------------------------------------
 
 print("------------------------------------------------------------------------------------------------------------------------")
 # Call the pdf_to_images method
-images = result.pdf_to_images(file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf")
+images = result.pdf_to_images(file_name="LLM-Test/600_pages.pdf")
+# document_main, _ = ocr_from_images_dict(images_dict=images)
+# print("OCR text from images:" )
 
 print("------------------------------------------------------------------------------------------------------------------------")
 # call the add_documents_to_index method
-success = result.add_documents_to_index(images=images, file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf", metadata=metadata)
-print("Indexing success:", success)
+# success = result.add_documents_to_index(images=images, file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf", metadata=metadata)
+# print("Indexing success:", success)
 
 print("------------------------------------------------------------------------------------------------------------------------")
 icd_description =  {

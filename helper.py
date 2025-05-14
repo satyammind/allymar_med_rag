@@ -138,25 +138,13 @@ def ocr_from_images_dict(
     return "".join(final_texts), len(final_texts)
 
 
-def detect_text_from_image(image_data):
-    """
-    Detects text in an image file using Google Vision API and returns it.
-    
-    Args:
-        image_data (bytes): The image data in bytes format.
-        
-    Returns:
-        str: The detected text.
-    """
-    client = vision.ImageAnnotatorClient()
-    image = vision.Image(content=image_data)
+def calculate_total_image_size_gb(image_dict):
+    total_bytes = 0
+    for page_num, img in image_dict.items():
+        width, height = img.size
+        channels = len(img.getbands())  # For RGB, this should be 3
+        total_bytes += width * height * channels
 
-    # Perform text detection
-    response = client.text_detection(image=image)
-    texts = response.text_annotations
+    total_gb = total_bytes / (1024 ** 3)  # Convert bytes to GB
+    return round(total_gb, 2)
 
-    # Extract and return the detected text (first annotation contains full text)
-    if texts:
-        return texts[0].description
-    else:
-        return ""

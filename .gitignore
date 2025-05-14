@@ -1,3 +1,7 @@
 allymarclinicalnotesapp-0c6d62f3197f.json
 .env
 google_vision_ocr.py
+__pycache__/
+**/__pycache__/
+*.py[cod]
+__pycache__/helper.cpython-310.pyc
