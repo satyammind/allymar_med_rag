@@ -1,15 +1,15 @@
 # Import
+import io
 from typing import Dict
 import pandas as pd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
-from pdf2image import convert_from_path
-from paddleocr import PaddleOCR
-
 from google.cloud import bigquery, storage
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from google.cloud import vision
+
 
 # BigQuery Utilities
 def df_from_bigquery(table: str = None, custom_sql: str = None) -> pd.DataFrame:
@@ -20,17 +20,6 @@ def df_from_bigquery(table: str = None, custom_sql: str = None) -> pd.DataFrame:
     query = custom_sql if custom_sql else f"SELECT * FROM `{table}`"
     return client.query(query).to_dataframe()
 
-# Get Patient Name
-def get_patient_name_by_member_id(table: str, member_id: str) -> str:
-    client = bigquery.Client()
-    query = f"""
-        SELECT patient_name
-        FROM `{table}`
-        WHERE member_id = '{member_id}'
-        LIMIT 1
-    """
-    df = client.query(query).to_dataframe()
-    return df['patient_name'].iloc[0] if not df.empty else None
 
 def get_file(bucket_name: str, file_path: str, local_file_name: str) -> str:
     """Download a file from a GCS bucket and save it locally."""
@@ -68,7 +57,6 @@ def split_documents(document_main: str, pdf_file_path: str, pat_name: str, membe
 
     return text_splitter.split_documents(docs)
 
-print("Helper functions loaded successfully.")
 # TAMPER Query Generation
 def generate_tamper_queries(icd: str, patient_name: str) -> Dict[str, str]:
     """Generate standard TAMPER-style clinical queries."""
@@ -84,15 +72,14 @@ def generate_tamper_queries(icd: str, patient_name: str) -> Dict[str, str]:
 
 # Query-Knowledgebase Combiner
 def combine_queries_with_kg(
-    table: str,
-    member_id: str,
+    patient_name: str,
     icd: str,
     icd_description: Dict[str, str]
+
 ) -> Dict[str, Dict[str, str]]:
     """
     Combine TAMPER queries with ICD knowledge graph snippets.
     """
-    patient_name = get_patient_name_by_member_id(table, member_id)
     queries = generate_tamper_queries(icd, patient_name)
     combined = {}
 
@@ -106,24 +93,38 @@ def combine_queries_with_kg(
             "query": query,
             "knowledge_base": kg_text
         }
-
     return combined
 
+def ocr_google_vision(img: Image.Image) -> str:
+    """Perform OCR on a PIL image using Google Vision API."""
+    # Convert PIL Image to bytes
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    image_data = img_byte_arr.getvalue()
 
-def ocr_paddle(img: Image.Image) -> str:
-    # Convert PIL Image to numpy array if necessary
-    if isinstance(img, Image.Image):
-        img = np.array(img)
-    ocr = PaddleOCR(use_angle_cls=True, lang="en")
-    result = ocr.ocr(img, cls=True)
-    return "\n".join([line[1][0] for res in result for line in res])
+    # Initialize Google Vision client
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=image_data)
+
+    # Perform text detection
+    response = client.text_detection(image=image)
+
+    # Check for errors
+    if response.error.message:
+        raise Exception(f'Google Vision API Error: {response.error.message}')
+
+    # Extract full text (first entry contains the full combined text)
+    if response.text_annotations:
+        return response.text_annotations[0].description.strip()
+    else:
+        return ""
 
 def ocr_from_images_dict(
     images_dict: Dict[int, Image.Image], max_workers: int = 1
 ) -> str:
-    """OCR all images from a dict of page_number: PIL.Image"""
+    """OCR all images from a dict of page_number: PIL.Image using Google Vision."""
     def process(page_number: int, image: Image.Image):
-        text = ocr_paddle(image)
+        text = ocr_google_vision(image)
         return (
             f"\n PAGE NUMBER:- {page_number}----------------------------------------\nDATA: {text}",
             page_number,
@@ -135,3 +136,27 @@ def ocr_from_images_dict(
     results.sort(key=lambda x: x[1])
     final_texts = [r[0] for r in results]
     return "".join(final_texts), len(final_texts)
+
+
+def detect_text_from_image(image_data):
+    """
+    Detects text in an image file using Google Vision API and returns it.
+    
+    Args:
+        image_data (bytes): The image data in bytes format.
+        
+    Returns:
+        str: The detected text.
+    """
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=image_data)
+
+    # Perform text detection
+    response = client.text_detection(image=image)
+    texts = response.text_annotations
+
+    # Extract and return the detected text (first annotation contains full text)
+    if texts:
+        return texts[0].description
+    else:
+        return ""

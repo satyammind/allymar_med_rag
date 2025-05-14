@@ -9,7 +9,7 @@ from typing import List, Any, Dict, Optional, Union
 from retry import retry
 from pdf2image import convert_from_path
 import vertexai
-from helper import df_from_bigquery, get_file, split_documents, combine_queries_with_kg, get_patient_name_by_member_id, ocr_from_images_dict
+from helper import df_from_bigquery, get_file, split_documents, combine_queries_with_kg, ocr_from_images_dict
 from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
 from PIL import Image
 from langchain_google_community import BigQueryVectorStore
@@ -18,32 +18,40 @@ from langchain.retrievers.document_compressors import FlashrankRerank
 from langchain.chains import RetrievalQA
 from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
+from dotenv import load_dotenv
+from PyPDF2 import PdfReader
 
+load_dotenv(verbose=True)
 
+# Set up Google Cloud credentials
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"]="allymarclinicalnotesapp-0c6d62f3197f.json"
+PROJECT_ID = os.getenv("PROJECT_ID")
+DATASET = os.getenv("DATASET")
+TABLE = os.getenv("TABLE")
+REGION = os.getenv("REGION")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME")
 
-PROJECT_ID = "allymarclinicalnotesapp"
-DATASET = 'Medical_Encounter'
-TABLE = 'Retrieval_Encounters_Synthetic_Data'
-REGION = "us-central1"
 # from langchain_google_genai import GoogleGenerativeAIEmbeddings
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"]="TRUE"
 
 # embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-exp-03-07")
-EMBEDDING_MODEL = VertexAIEmbeddings(model_name="text-embedding-004", project=PROJECT_ID, location=REGION)
+EMBEDDING_MODEL = VertexAIEmbeddings(model_name=EMBEDDING_MODEL_NAME, project=PROJECT_ID, location=REGION)
 
-vertexai.init(location= "us-central1" , project=PROJECT_ID)
+vertexai.init(location= REGION , project=PROJECT_ID)
 llm = VertexAI(model_name="gemini-2.0-flash")
 
-DEFAULT_K = 10
-DEFAULT_THRESHOLD = 0.8
+DEFAULT_K = os.getenv("DEFAULT_K")
+DEFAULT_THRESHOLD = os.getenv("DEFAULT_THRESHOLD")
 
 ## Set file-path , table name, member_id and bucket name
 table = f"{PROJECT_ID}.{DATASET}.{TABLE}"
-bucket = "dev-filestore-healthrecords"
-metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da082"}
+bucket = os.getenv("BUCKET_NAME")
 
-# Initialize the bigquery
+metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da052"}
+patient_name = "Amelia Harris"
+
+
+# Initialize the bigquery for data ingestion
 bq_store = BigQueryVectorStore(
     project_id=PROJECT_ID,
     dataset_name=DATASET,
@@ -55,7 +63,7 @@ bq_store = BigQueryVectorStore(
 
 @dataclass(slots=True)
 class MemberRAG:
-    compressor = FlashrankRerank()
+    compressor = FlashrankRerank(top_n=500)
     member_id: str = field(default=metadata.get("member_id"))
     table: str = field(default=table)
     bucket: str = field(default=bucket)
@@ -92,24 +100,32 @@ class MemberRAG:
         """Convert a PDF into a dict of images: {page_number: Image}"""
         # get file path for OCR
         pdf_path = get_file(bucket_name=bucket, file_path=file_name, local_file_name=file_name.split('/')[-1])
-        images = convert_from_path(pdf_path, dpi=dpi)
-        images_dict = {i + 1: img for i, img in enumerate(images)}
+        # images = convert_from_path(pdf_path, dpi=dpi)
+        num_pages = len(PdfReader(pdf_path).pages)
+        
+        images_dict = {}
+
+        for page_number in range(1, num_pages + 1):
+            images = convert_from_path(
+                pdf_path,
+                dpi=dpi,
+                first_page=page_number,
+                last_page=page_number
+            )
+            if images:
+                images_dict[page_number] = images[0]
+        print(">>>>>>>> PDF converted to images successfully===========================================",images_dict)
+
         return images_dict
+
 
     @retry(max_retries=5, backoff_factor=.5, verbose=True)
     def add_documents_to_index(self, images: dict, file_name: str, metadata: dict= {}) -> bool:
         """Add documents to the index."""
         try:
-            print("Performing OCR on retrieved pdf...")
+            print("Performing OCR on retrieved images...")
             document_main, _ = ocr_from_images_dict(images_dict=images)
-
-            try:
-                shutil.rmtree('IMG')
-            except FileNotFoundError:
-                print("OCR not performed yet")
-
-            # get patient name from metadata
-            patient_name = get_patient_name_by_member_id(table=self.table, member_id=self.member_id)
+            print("OCR completed successfully.")
 
             gcs_file_path = f"gs://{self.bucket}/{file_name}"
 
@@ -131,16 +147,18 @@ class MemberRAG:
             # Raise exception with context
             raise RuntimeError(f"Failed to verify/create index for member_id={metadata.get('member_id')}: {e}")
 
+
     def get_relevant_docs_and_metadata(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> List[Dict[str, Any]]:
         """Get relevant documents and metadata for a given question"""
         if self._documents is None:
             self.get_documents()
-        retriever = self._documents.as_retriever(k=k)
+        retriever = self._documents.as_retriever(k=k, threshold=threshold),
         results = retriever.invoke(question)
         return [
             {"text": doc.page_content, "metadata": doc.metadata}
             for doc in results
         ]
+
 
     def query(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> Union[str, Exception]:
         """Query the RAG model with a question and return the answer"""
@@ -175,8 +193,7 @@ class MemberRAG:
 
             # Step 1: Generate knowledge graph-enhanced queries
             combined_queries = combine_queries_with_kg(
-                table=self.table,
-                member_id=self.member_id,
+                patient_name=patient_name,
                 icd=icd,
                 icd_description=icd_description
             )
@@ -276,23 +293,24 @@ print("-------------------------------------------------------------------------
 # print("relavent_docs===============================================================================:", data6)
 
 print("------------------------------------------------------------------------------------------------------------------------")
-# # Call the pdf_to_images method
-images = result.pdf_to_images(file_name="LLM-Test/600_pages.pdf")
+# Call the pdf_to_images method
+images = result.pdf_to_images(file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf")
 
 print("------------------------------------------------------------------------------------------------------------------------")
-# # call the add_documents_to_index method
-success = result.add_documents_to_index(images=images, file_name="LLM-Test/600_pages.pdf", metadata=metadata)
+# call the add_documents_to_index method
+success = result.add_documents_to_index(images=images, file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf", metadata=metadata)
 print("Indexing success:", success)
 
-# print("------------------------------------------------------------------------------------------------------------------------")
-# icd_description =  {
-#         "T": """**T — Treatment** :Documentation for familial hypophosphatemia (FH) typically reflects treatment with **oral phosphate salts** (e.g., 20–80 mg/kg/day elemental phosphorus split into 4–6 daily doses) and **active vitamin D analogs** like calcitriol (0.25–0.75 µg/day) to counteract renal phosphate wasting and impaired mineralization[^1][^3]. Since 2018, **burosumab** (Crysvita), a monoclonal antibody targeting FGF23, is administered subcutaneously every 2–4 weeks for X-linked hypophosphatemia (XLH)[^1][^7]. Documentation often specifies medication dosages, frequency, and adjustments based on lab monitoring or adverse effects (e.g., hypercalciuria, nephrocalcinosis)[^3]. Supportive measures, such as dental sealants to prevent abscesses, may also be noted[^1]. Guideline-concordant care emphasizes individualized regimens to balance biochemical correction with avoidance of complications[^3][^7].""",
-#         "A": """**A — Assessment**: Clinical documentation typically includes **hypophosphatemia** (serum phosphate below age-adjusted norms), **elevated FGF23**, and **normal calcium/25-hydroxyvitamin D levels**, alongside **renal phosphate wasting** (elevated urinary phosphate or reduced TmP/GFR)[^1][^3][^7]. Radiographs may show **rickets** (children) or **osteomalacia** (adults), such as metaphyseal fraying or pseudofractures[^3][^7]. Genetic testing confirming *PHEX* (XLH) or *FGF23* (ADHR) variants is increasingly documented to differentiate FH from acquired causes[^1][^7]. Notes often exclude nutritional deficiencies or secondary causes (e.g., tumor-induced osteomalacia) and may reference family history of skeletal abnormalities[^3][^7].""",
-#         "M": """**M — Monitoring** :Longitudinal documentation includes **serial serum phosphate**, **alkaline phosphatase (ALP)**, **urinary calcium/creatinine ratios**, and **renal function tests** every 3–6 months to gauge treatment response and detect complications like hyperparathyroidism or nephrocalcinosis[^3][^7]. Radiographic monitoring (e.g., annual limb X-rays in children) tracks bone healing or deformities[^3]. Growth velocity charts in pediatric patients and dual-energy X-ray absorptiometry (DXA) scans in adults may supplement monitoring[^7]. Documentation often notes dose adjustments based on ALP trends or symptom progression[^3].""",
-#         "P": """**P — Plan**: Care plans commonly outline **medication optimization** (e.g., "increase phosphate to 60 mg/kg/day if ALP remains elevated"), **dietary modifications** (phosphate-rich foods), and **surgical referrals** for severe skeletal deformities[^1][^7]. Prophylactic dental care and **genetic counseling** for family members are frequently included[^1][^7]. Guidelines recommend documenting intent to transition pediatric patients to adult dosing regimens or consider burosumab for refractory cases[^3][^7]. Plans may also specify monitoring intervals (e.g., "repeat renal ultrasound in 6 months to assess for nephrocalcinosis")[^3].""",
-#         "E": """**E — Evaluation**: Progress is evaluated via **normalization of ALP**, **improved phosphate retention** (TmP/GFR), and **radiographic evidence of bone healing**[^3][^7]. Documentation may note "reduced leg bowing on X-ray" or "decreased bone pain with current regimen"[^1][^7]. In adults, stabilization of pseudofractures or improved mobility metrics (e.g., 6-minute walk test) are tracked[^7]. Persistent hypophosphatemia or complications (e.g., hyperparathyroidism) trigger reassessment of therapy[^3]. Pediatric growth curves and dentition assessments provide additional outcome measures[^1][^7].""",
-#         "R": """**R — Referral** : Common referrals include **nephrology** (renal complications), **endocrinology** (refractory hypophosphatemia), **orthopedics** (deformity correction), and **dentistry** (abscess prevention)[^1][^7]. Genetic counseling referrals are standard for family planning or testing asymptomatic relatives[^1][^7]. Rarely, patients with atypical presentations may be referred to metabolic bone centers for advanced diagnostics (e.g., FGF23 assays or genetic panels)[^3][^7]. Documentation typically justifies referrals (e.g., "orthopedic evaluation for worsening genu varum")[^1]."""
-#     }
-# icd_code = "E83.31"
+print("------------------------------------------------------------------------------------------------------------------------")
+icd_description =  {
+        "T": """**T — Treatment** :Documentation for familial hypophosphatemia (FH) typically reflects treatment with **oral phosphate salts** (e.g., 20–80 mg/kg/day elemental phosphorus split into 4–6 daily doses) and **active vitamin D analogs** like calcitriol (0.25–0.75 µg/day) to counteract renal phosphate wasting and impaired mineralization[^1][^3]. Since 2018, **burosumab** (Crysvita), a monoclonal antibody targeting FGF23, is administered subcutaneously every 2–4 weeks for X-linked hypophosphatemia (XLH)[^1][^7]. Documentation often specifies medication dosages, frequency, and adjustments based on lab monitoring or adverse effects (e.g., hypercalciuria, nephrocalcinosis)[^3]. Supportive measures, such as dental sealants to prevent abscesses, may also be noted[^1]. Guideline-concordant care emphasizes individualized regimens to balance biochemical correction with avoidance of complications[^3][^7].""",
+        "A": """**A — Assessment**: Clinical documentation typically includes **hypophosphatemia** (serum phosphate below age-adjusted norms), **elevated FGF23**, and **normal calcium/25-hydroxyvitamin D levels**, alongside **renal phosphate wasting** (elevated urinary phosphate or reduced TmP/GFR)[^1][^3][^7]. Radiographs may show **rickets** (children) or **osteomalacia** (adults), such as metaphyseal fraying or pseudofractures[^3][^7]. Genetic testing confirming *PHEX* (XLH) or *FGF23* (ADHR) variants is increasingly documented to differentiate FH from acquired causes[^1][^7]. Notes often exclude nutritional deficiencies or secondary causes (e.g., tumor-induced osteomalacia) and may reference family history of skeletal abnormalities[^3][^7].""",
+        "M": """**M — Monitoring** :Longitudinal documentation includes **serial serum phosphate**, **alkaline phosphatase (ALP)**, **urinary calcium/creatinine ratios**, and **renal function tests** every 3–6 months to gauge treatment response and detect complications like hyperparathyroidism or nephrocalcinosis[^3][^7]. Radiographic monitoring (e.g., annual limb X-rays in children) tracks bone healing or deformities[^3]. Growth velocity charts in pediatric patients and dual-energy X-ray absorptiometry (DXA) scans in adults may supplement monitoring[^7]. Documentation often notes dose adjustments based on ALP trends or symptom progression[^3].""",
+        "P": """**P — Plan**: Care plans commonly outline **medication optimization** (e.g., "increase phosphate to 60 mg/kg/day if ALP remains elevated"), **dietary modifications** (phosphate-rich foods), and **surgical referrals** for severe skeletal deformities[^1][^7]. Prophylactic dental care and **genetic counseling** for family members are frequently included[^1][^7]. Guidelines recommend documenting intent to transition pediatric patients to adult dosing regimens or consider burosumab for refractory cases[^3][^7]. Plans may also specify monitoring intervals (e.g., "repeat renal ultrasound in 6 months to assess for nephrocalcinosis")[^3].""",
+        "E": """**E — Evaluation**: Progress is evaluated via **normalization of ALP**, **improved phosphate retention** (TmP/GFR), and **radiographic evidence of bone healing**[^3][^7]. Documentation may note "reduced leg bowing on X-ray" or "decreased bone pain with current regimen"[^1][^7]. In adults, stabilization of pseudofractures or improved mobility metrics (e.g., 6-minute walk test) are tracked[^7]. Persistent hypophosphatemia or complications (e.g., hyperparathyroidism) trigger reassessment of therapy[^3]. Pediatric growth curves and dentition assessments provide additional outcome measures[^1][^7].""",
+        "R": """**R — Referral** : Common referrals include **nephrology** (renal complications), **endocrinology** (refractory hypophosphatemia), **orthopedics** (deformity correction), and **dentistry** (abscess prevention)[^1][^7]. Genetic counseling referrals are standard for family planning or testing asymptomatic relatives[^1][^7]. Rarely, patients with atypical presentations may be referred to metabolic bone centers for advanced diagnostics (e.g., FGF23 assays or genetic panels)[^3][^7]. Documentation typically justifies referrals (e.g., "orthopedic evaluation for worsening genu varum")[^1]."""
+    }
+icd_code = "E83.31"
 # is_valid_suspect = result.get_is_valid_suspect(icd=icd_code, icd_description=icd_description)
 # print("Is valid suspect:", is_valid_suspect)
+
