@@ -3,9 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
-import json
 import os
-import shutil
 from typing import List, Any, Dict, Optional, Union
 from retry import retry
 from pdf2image import convert_from_path
@@ -134,13 +132,13 @@ class MemberRAG:
         return images_dict
 
 
-    # @retry(max_retries=5, backoff_factor=.5, verbose=True)
+    @retry(max_retries=5, backoff_factor=.5, verbose=True)
     def add_documents_to_index(self, images: dict, file_name: str, metadata: dict= {}) -> bool:
         """Add documents to the index."""
         try:
             bq_file_name=f"LLM-Test/{self.member_id}/{file_name}"
             gcs_file_path = f"gs://{self.bucket}/{bq_file_name}"
-            destination_file_name = f"LLM-Test/{self.member_id}/annotations/{file_name}"
+            destination_file_name = f"LLM-Test/{self.member_id}/annotations/{file_name.replace('.pdf','.json')}"
 
             print("Performing OCR on retrieved images...")
             document_main= ocr_from_images_dict(images_dict=images, bucket_name=bucket, destination_blob_name=destination_file_name)
@@ -276,62 +274,8 @@ class MemberRAG:
 
 
 "==========================================================================================================================================="
-
-# Example usage
-result = MemberRAG(member_id=metadata.get("member_id"))
-
-print("------------------------------------------------------------------------------------------------------------------------")
-question1 = "What is the treatment plan for this patient?"
-question2 = "What is the assessment for this patient?"
-question3 = "What is the monitoring plan for this patient?"
-question4 = "What is the evaluation plan for this patient?"
-question5 = "What is the referral plan for this patient?"
-question6 = "What is the full knowledge for this patient?"
-
-print("------------------------------------------------------------------------------------------------------------------------")
-# # Call the query method
-# response1 = result.query(question=question1)
-# print("Query response:11111111111111111111111111111111111111111111", response1)
-
-# response2 = result.query(question=question2)
-# print("Query response:22222222222222222222222222222222222222222222", response2)
-
-# response3 = result.query(question=question3)
-# print("Query response:3333333333333333333333333333333333333333333333333", response3)
-# response4 = result.query(question=question4)
-# print("Query response:4444444444444444444444444444444444444444444444444444", response4)
-# response5 = result.query(question=question5)
-# print("Query response:55555555555555555555555555555555555555555555555", response5)
-# response6 = result.query(question=question6)    
-# print("Query response:6666666666666666666666666666666666666666666666666", response6)
-
-print("------------------------------------------------------------------------------------------------------------------------")
-# Call the get_relevant_docs_and_metadata method
-# data1 = result.get_relevant_docs_and_metadata(question=question1, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
-# print("relavent_docs===============================================================================:", data1)
-
-# data2 = result.get_relevant_docs_and_metadata(question=question2, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
-# print("relavent_docs===============================================================================:", data2)   
-# data3 = result.get_relevant_docs_and_metadata(question=question3, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
-# print("relavent_docs===============================================================================:", data3)
-# data4 = result.get_relevant_docs_and_metadata(question=question4, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
-# print("relavent_docs===============================================================================:", data4)
-# data5 = result.get_relevant_docs_and_metadata(question=question5, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
-# print("relavent_docs===============================================================================:", data5)
-# data6 = result.get_relevant_docs_and_metadata(question=question6, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
-# print("relavent_docs===============================================================================:", data6)
-
-print("------------------------------------------------------------------------------------------------------------------------")
-# Call the pdf_to_images method
-images = result.pdf_to_images(file_name="DEV_CCL summary (1).pdf")
-# document_main , all_annonations = ocr_from_images_dict(images_dict=images)
-# print("OCR text from images:" )
-
-print("------------------------------------------------------------------------------------------------------------------------")
-# call the add_documents_to_index method
-success = result.add_documents_to_index(images=images, file_name="DEV_CCL summary (1).pdf", metadata=metadata)
-
-print("------------------------------------------------------------------------------------------------------------------------")
+# SAMPLE DATA FOR THE KNOWLEDGE GRAPH
+icd_code = "E83.31"
 icd_description =  {
         "T": """**T — Treatment** :Documentation for familial hypophosphatemia (FH) typically reflects treatment with **oral phosphate salts** (e.g., 20–80 mg/kg/day elemental phosphorus split into 4–6 daily doses) and **active vitamin D analogs** like calcitriol (0.25–0.75 µg/day) to counteract renal phosphate wasting and impaired mineralization[^1][^3]. Since 2018, **burosumab** (Crysvita), a monoclonal antibody targeting FGF23, is administered subcutaneously every 2–4 weeks for X-linked hypophosphatemia (XLH)[^1][^7]. Documentation often specifies medication dosages, frequency, and adjustments based on lab monitoring or adverse effects (e.g., hypercalciuria, nephrocalcinosis)[^3]. Supportive measures, such as dental sealants to prevent abscesses, may also be noted[^1]. Guideline-concordant care emphasizes individualized regimens to balance biochemical correction with avoidance of complications[^3][^7].""",
         "A": """**A — Assessment**: Clinical documentation typically includes **hypophosphatemia** (serum phosphate below age-adjusted norms), **elevated FGF23**, and **normal calcium/25-hydroxyvitamin D levels**, alongside **renal phosphate wasting** (elevated urinary phosphate or reduced TmP/GFR)[^1][^3][^7]. Radiographs may show **rickets** (children) or **osteomalacia** (adults), such as metaphyseal fraying or pseudofractures[^3][^7]. Genetic testing confirming *PHEX* (XLH) or *FGF23* (ADHR) variants is increasingly documented to differentiate FH from acquired causes[^1][^7]. Notes often exclude nutritional deficiencies or secondary causes (e.g., tumor-induced osteomalacia) and may reference family history of skeletal abnormalities[^3][^7].""",
@@ -340,8 +284,30 @@ icd_description =  {
         "E": """**E — Evaluation**: Progress is evaluated via **normalization of ALP**, **improved phosphate retention** (TmP/GFR), and **radiographic evidence of bone healing**[^3][^7]. Documentation may note "reduced leg bowing on X-ray" or "decreased bone pain with current regimen"[^1][^7]. In adults, stabilization of pseudofractures or improved mobility metrics (e.g., 6-minute walk test) are tracked[^7]. Persistent hypophosphatemia or complications (e.g., hyperparathyroidism) trigger reassessment of therapy[^3]. Pediatric growth curves and dentition assessments provide additional outcome measures[^1][^7].""",
         "R": """**R — Referral** : Common referrals include **nephrology** (renal complications), **endocrinology** (refractory hypophosphatemia), **orthopedics** (deformity correction), and **dentistry** (abscess prevention)[^1][^7]. Genetic counseling referrals are standard for family planning or testing asymptomatic relatives[^1][^7]. Rarely, patients with atypical presentations may be referred to metabolic bone centers for advanced diagnostics (e.g., FGF23 assays or genetic panels)[^3][^7]. Documentation typically justifies referrals (e.g., "orthopedic evaluation for worsening genu varum")[^1]."""
     }
-icd_code = "E83.31"
-# is_valid_suspect = result.get_is_valid_suspect(icd=icd_code, icd_description=icd_description)
-# print("Is valid suspect:", is_valid_suspect)
+
+# Step 1: Initialize the RAG pipeline for the member
+rag = MemberRAG()
+
+# Step 2: Convert PDF to images
+images = rag.pdf_to_images(file_name="DEV_CCL summary (1).pdf")
+
+# Step 3: Add the OCR-extracted content to the BigQuery index if not the pdf data is not indexed
+success = rag.add_documents_to_index(images=images, file_name="DEV_CCL summary (1).pdf")
+
+# Step 4: Ask a medical question
+question = "What medications has the patient been prescribed for hypophosphatemia?"
+answer = rag.query(question=question)
+
+print("\nAnswer from RAG:")
+print(answer)
+
+suspect_decision = rag.get_is_valid_suspect(icd=icd_code, icd_description=icd_description)
+
+print("\nWould you suspect the condition today?")
+print(suspect_decision)
+
+# Call the get_relevant_docs_and_metadata method
+data1 = rag.get_relevant_docs_and_metadata(question=question, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
+print("\nRetrieved relavant dics")
 
 

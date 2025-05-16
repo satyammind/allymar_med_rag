@@ -1,16 +1,14 @@
 # Import
 import io
 import json
-from typing import Dict, List, Tuple
+from typing import Dict
 import pandas as pd
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 from google.cloud import bigquery, storage
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from google.cloud import vision
-
 
 # BigQuery Utilities
 def df_from_bigquery(table: str = None, custom_sql: str = None) -> pd.DataFrame:
@@ -47,39 +45,8 @@ def save(bucket_name, data, destination_blob_name):
     blob = bucket.blob(destination_blob_name)
     blob.upload_from_string(data)
 
-# def split_documents(document_main: str, pdf_file_path: str, pat_name: str, member_id: str, all_annonations: dict):
-#     """Split document into LangChain Document objects with metadata."""
-#     pages = document_main.split('\n PAGE NUMBER')[1:]
-#     docs = [
-#         Document(
-#             page_content=f"PAGE NUMBER:-  {page.strip()} ",
-#             metadata={
-#                 "source": f"Page number: {i+1}",
-#                 "patient_name": pat_name,
-#                 "member_id": member_id,
-#                 "file_path": pdf_file_path,
-#                 "annonations": [json.loads(annotation.to_json()) for annotation in all_annonations]
 
-#             }
-#         )
-#         for i, page in enumerate(pages)
-#     ]
-
-#     text_splitter = RecursiveCharacterTextSplitter(
-#         chunk_size=10000,
-#         chunk_overlap=100,
-#         separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
-#     )
-
-#     return text_splitter.split_documents(docs)
-
-
-def split_documents(
-    document_main: str,
-    pdf_file_path: str,
-    pat_name: str,
-    member_id: str,
-):
+def split_documents(document_main: str,pdf_file_path: str,pat_name: str,member_id: str):
     """Split document into LangChain Document objects with metadata."""
     pages = document_main.split('\n PAGE NUMBER')[1:]
 
@@ -121,12 +88,7 @@ def generate_tamper_queries(icd: str, patient_name: str) -> Dict[str, str]:
     }
 
 # Query-Knowledgebase Combiner
-def combine_queries_with_kg(
-    patient_name: str,
-    icd: str,
-    icd_description: Dict[str, str]
-
-) -> Dict[str, Dict[str, str]]:
+def combine_queries_with_kg(patient_name: str, icd: str, icd_description: Dict[str, str]) -> Dict[str, Dict[str, str]]:
     """
     Combine TAMPER queries with ICD knowledge graph snippets.
     """
@@ -144,49 +106,6 @@ def combine_queries_with_kg(
             "knowledge_base": kg_text
         }
     return combined
-
-# def ocr_google_vision(img: Image.Image) -> str:
-#     """Perform OCR on a PIL image using Google Vision API."""
-#     # Convert PIL Image to bytes
-#     img_byte_arr = io.BytesIO()
-#     img.save(img_byte_arr, format='PNG')
-#     image_data = img_byte_arr.getvalue()
-
-#     # Initialize Google Vision client
-#     client = vision.ImageAnnotatorClient()
-#     image = vision.Image(content=image_data)
-
-#     # Perform text detection
-#     response = client.text_detection(image=image)
-#     # with open("response.json", "w") as f:
-#     #     f.write(str(response))
-#     # Check for errors
-#     if response.error.message:
-#         raise Exception(f'Google Vision API Error: {response.error.message}')
-
-#     # Extract full text (first entry contains the full combined text)
-#     if response.text_annotations:
-#         return response.text_annotations[0].description.strip()
-#     else:
-#         return ""
-
-# def ocr_from_images_dict(
-#     images_dict: Dict[int, Image.Image], max_workers: int = 1
-# ) -> str:
-#     """OCR all images from a dict of page_number: PIL.Image using Google Vision."""
-#     def process(page_number: int, image: Image.Image):
-#         text = ocr_google_vision(image)
-#         return (
-#             f"\n PAGE NUMBER:- {page_number}----------------------------------------\nDATA: {text}",
-#             page_number,
-#         )
-
-#     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-#         results = list(executor.map(lambda item: process(*item), images_dict.items()))
-
-#     results.sort(key=lambda x: x[1])
-#     final_texts = [r[0] for r in results]
-#     return "".join(final_texts), len(final_texts)
 
 
 def ocr_google_vision(img: Image.Image) -> Dict:
@@ -250,13 +169,10 @@ def ocr_google_vision(img: Image.Image) -> Dict:
             }
         ]
     }
-
     return response_dict
 
 
-def ocr_from_images_dict(
-    bucket_name: str, destination_blob_name: str,images_dict: Dict[int, Image.Image], max_workers: int = 1, 
-) -> str:
+def ocr_from_images_dict(bucket_name: str, destination_blob_name: str,images_dict: Dict[int, Image.Image], max_workers: int = 1) -> str:
     """OCR all images from a dict of page_number: PIL.Image using Google Vision."""
     annotations = {}
     results = []
@@ -290,14 +206,14 @@ def ocr_from_images_dict(
     return "".join(r[0] for r in results)
 
 
-
+# calculate the size of all images converted from pdf
 def calculate_total_image_size_gb(image_dict):
     total_bytes = 0
     for page_num, img in image_dict.items():
         width, height = img.size
-        channels = len(img.getbands())  # For RGB, this should be 3
+        channels = len(img.getbands()) 
         total_bytes += width * height * channels
 
-    total_gb = total_bytes / (1024 ** 3)  # Convert bytes to GB
+    total_gb = total_bytes / (1024 ** 3)
     return round(total_gb, 2)
 
