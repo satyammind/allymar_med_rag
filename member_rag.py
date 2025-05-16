@@ -3,6 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
+import json
 import os
 import shutil
 from typing import List, Any, Dict, Optional, Union
@@ -17,9 +18,9 @@ from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriev
 from langchain.retrievers.document_compressors import FlashrankRerank
 from langchain.chains import RetrievalQA
 from langchain.docstore.document import Document
-from langchain_community.vectorstores import FAISS
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
+
 
 load_dotenv(verbose=True)
 
@@ -51,11 +52,11 @@ DEFAULT_THRESHOLD = float(os.getenv("DEFAULT_THRESHOLD", 0.8))
 table = f"{PROJECT_ID}.{DATASET}.{TABLE}"
 bucket = os.getenv("BUCKET_NAME")
 
-metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da052"}
-patient_name = "Amelia Harris"
+metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da082"}
+patient_name = "John Doe"
 
 
-# Initialize the bigquery for data ingestion
+# Initialize the bigquery for data ingestion and retrieval
 bq_store = BigQueryVectorStore(
     project_id=PROJECT_ID,
     dataset_name=DATASET,
@@ -103,7 +104,8 @@ class MemberRAG:
     def pdf_to_images(self, file_name: str, dpi: int = 300) -> Dict[int, Image.Image]:
         """Convert a PDF into a dict of images: {page_number: Image}"""
         # get file path for OCR
-        pdf_path = get_file(bucket_name=bucket, file_path=file_name, local_file_name=file_name.split('/')[-1])
+        bq_file_name=f"LLM-Test/{self.member_id}/{file_name}"
+        pdf_path = get_file(bucket_name=bucket, file_path=bq_file_name, local_file_name=file_name.split('/')[-1])
         # images = convert_from_path(pdf_path, dpi=dpi)
         num_pages = len(PdfReader(pdf_path).pages)
         
@@ -125,22 +127,23 @@ class MemberRAG:
         else:
             print(f"The file {pdf_path} does not exist")
 
-        print(">>>>>>>> PDF converted to images successfully===========================================",images_dict)
+        print("Pdf's are converted to images successfully.")
         total_size_gb = calculate_total_image_size_gb(images_dict)
         print(f"Total size of images: {total_size_gb} GB")
 
         return images_dict
 
 
-    @retry(max_retries=5, backoff_factor=.5, verbose=True)
+    # @retry(max_retries=5, backoff_factor=.5, verbose=True)
     def add_documents_to_index(self, images: dict, file_name: str, metadata: dict= {}) -> bool:
         """Add documents to the index."""
         try:
-            print("Performing OCR on retrieved images...")
-            document_main, _ = ocr_from_images_dict(images_dict=images)
-            print("OCR completed successfully.")
+            bq_file_name=f"LLM-Test/{self.member_id}/{file_name}"
+            gcs_file_path = f"gs://{self.bucket}/{bq_file_name}"
+            destination_file_name = f"LLM-Test/{self.member_id}/annotations/{file_name}"
 
-            gcs_file_path = f"gs://{self.bucket}/{file_name}"
+            print("Performing OCR on retrieved images...")
+            document_main= ocr_from_images_dict(images_dict=images, bucket_name=bucket, destination_blob_name=destination_file_name)
 
             doc_splits = split_documents(document_main=document_main, pdf_file_path=gcs_file_path, pat_name=patient_name, member_id=self.member_id)
 
@@ -148,11 +151,11 @@ class MemberRAG:
             for idx, split in enumerate(doc_splits):
                 split.metadata["chunk"] = idx
 
-            print("Proceeding with Ingesting data to Bigquery...")
             # Data Ingestion to BigQuery
+            print("Proceeding with Ingesting data to Bigquery...")
             bq_store.add_documents(doc_splits)
 
-            print("Created Sucessfulley")
+            print("Indexing success:", True)
 
             return True
 
@@ -320,14 +323,13 @@ print("-------------------------------------------------------------------------
 
 print("------------------------------------------------------------------------------------------------------------------------")
 # Call the pdf_to_images method
-images = result.pdf_to_images(file_name="LLM-Test/600_pages.pdf")
-# document_main, _ = ocr_from_images_dict(images_dict=images)
+images = result.pdf_to_images(file_name="DEV_CCL summary (1).pdf")
+# document_main , all_annonations = ocr_from_images_dict(images_dict=images)
 # print("OCR text from images:" )
 
 print("------------------------------------------------------------------------------------------------------------------------")
 # call the add_documents_to_index method
-# success = result.add_documents_to_index(images=images, file_name="LLM-Test/Amelia_Harris_Redacted_EDited.pdf", metadata=metadata)
-# print("Indexing success:", success)
+success = result.add_documents_to_index(images=images, file_name="DEV_CCL summary (1).pdf", metadata=metadata)
 
 print("------------------------------------------------------------------------------------------------------------------------")
 icd_description =  {
@@ -341,4 +343,5 @@ icd_description =  {
 icd_code = "E83.31"
 # is_valid_suspect = result.get_is_valid_suspect(icd=icd_code, icd_description=icd_description)
 # print("Is valid suspect:", is_valid_suspect)
+
 
