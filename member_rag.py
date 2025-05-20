@@ -6,19 +6,20 @@ from datetime import date
 import os
 from typing import List, Any, Dict, Optional, Union
 from retry import retry
-from pdf2image import convert_from_path
 import vertexai
-from helper import calculate_total_image_size_gb, df_from_bigquery, get_file, split_documents, combine_queries_with_kg, ocr_from_images_dict
+from helper import df_from_bigquery, get_file, split_documents, combine_queries_with_kg
 from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
-from PIL import Image
 from langchain_google_community import BigQueryVectorStore
 from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import FlashrankRerank
 from langchain.chains import RetrievalQA
 from langchain.docstore.document import Document
 from dotenv import load_dotenv
-from PyPDF2 import PdfReader
-
+from pdf2image import pdfinfo_from_path, convert_from_path
+import gc
+import tempfile
+from google.genai import types
+from google import genai
 
 load_dotenv(verbose=True)
 
@@ -35,6 +36,7 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"]="TRUE"
 
 # embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-exp-03-07")
 EMBEDDING_MODEL = VertexAIEmbeddings(model_name=EMBEDDING_MODEL_NAME, project=PROJECT_ID, location=REGION)
+client = genai.Client(vertexai=True, project=PROJECT_ID, location=REGION)
 
 vertexai.init(location= REGION , project=PROJECT_ID)
 llm = VertexAI(model_name="gemini-2.0-flash")
@@ -51,7 +53,7 @@ table = f"{PROJECT_ID}.{DATASET}.{TABLE}"
 bucket = os.getenv("BUCKET_NAME")
 
 metadata={"member_id": "37149e94-216e-474b-af8b-3227b73da082"}
-patient_name = "John Doe"
+patient_name = "Amelia Harris"
 
 
 # Initialize the bigquery for data ingestion and retrieval
@@ -73,75 +75,83 @@ class MemberRAG:
     file_name: str = field(default="")
     _documents: Optional[Any] = None
 
+
     def get_documents(self):
         """Get documents from BigQuery and create a index."""
-        if self._documents is None:
-            sql = (
-                f"SELECT doc_id, content, embedding, source, chunk, file_path, patient_name "
-                f"FROM `{self.table}` "
-                f"WHERE member_id = '{self.member_id}'"
+        sql = (
+            f"SELECT doc_id, content, embedding, source, chunk, file_path, patient_name "
+            f"FROM `{self.table}` "
+            f"WHERE member_id = '{self.member_id}'"
+        )
+        df = df_from_bigquery(custom_sql=sql)
+        documents = [
+            Document(
+                page_content=row["content"],
+                metadata={
+                    "source": row["source"],
+                    "chunk": row["chunk"],
+                    "file_path": row["file_path"],
+                    "patient_name": row["patient_name"],
+                }
             )
-            df = df_from_bigquery(custom_sql=sql)
-            documents = [
-                Document(
-                    page_content=row["content"],
-                    metadata={
-                        "doc_id": row["doc_id"],
-                        "source": row["source"],
-                        "chunk": row["chunk"],
-                        "file_path": row["file_path"],
-                        "patient_name": row["patient_name"],
-                        "member_id": self.member_id
-                    }
-                )
-                for _, row in df.iterrows()
-            ] 
-            self._documents = documents
-            print(f">>>>>>> Documents initialized for member_id: {self.member_id}")
+            for _, row in df.iterrows()
+        ] 
+        return documents
 
-    def pdf_to_images(self, file_name: str, dpi: int = 300) -> Dict[int, Image.Image]:
-        """Convert a PDF into a dict of images: {page_number: Image}"""
-        # get file path for OCR
-        bq_file_name=f"LLM-Test/{self.member_id}/{file_name}"
-        pdf_path = get_file(bucket_name=bucket, file_path=bq_file_name, local_file_name=file_name.split('/')[-1])
-        # images = convert_from_path(pdf_path, dpi=dpi)
-        num_pages = len(PdfReader(pdf_path).pages)
-        
-        images_dict = {}
+    def ocr(self, pdf_path, page_number, dpi=300):
+        print("Performing OCR on page number:", page_number)
+        images = convert_from_path(pdf_path, dpi=dpi, first_page=page_number, last_page=page_number)
+        image = images[0]
 
-        for page_number in range(1, num_pages + 1):
-            images = convert_from_path(
-                pdf_path,
-                dpi=dpi,
-                first_page=page_number,
-                last_page=page_number
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_image_file:
+            image.save(temp_image_file.name, format="PNG")
+            temp_image_file_path = temp_image_file.name
+
+        try:
+
+            with open(temp_image_file_path, 'rb') as f:
+                image_bytes = f.read()
+
+            response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=[
+                types.Part.from_bytes(
+                data=image_bytes,
+                mime_type='image/jpeg',
+                ),
+                'Extract the text in the image verbatim'
+            ],
             )
-            if images:
-                images_dict[page_number] = images[0]
+            response=f"\n PAGE NUMBER:- {page_number}----------------------------------------\nDATA: {response.text}"
+            return response
+        finally:
+            # Clean up
+            os.remove(temp_image_file_path)
+            del image
+            gc.collect()
 
-        # remove the downloaded file
-        if os.path.exists(pdf_path):
-            os.remove(pdf_path)
-        else:
-            print(f"The file {pdf_path} does not exist")
-
-        print("Pdf's are converted to images successfully.")
-        total_size_gb = calculate_total_image_size_gb(images_dict)
-        print(f"Total size of images: {total_size_gb} GB")
-
-        return images_dict
-
-
-    @retry(max_retries=5, backoff_factor=.5, verbose=True)
-    def add_documents_to_index(self, images: dict, file_name: str, metadata: dict= {}) -> bool:
+    # @retry(max_retries=5, backoff_factor=.5, verbose=True)
+    def add_documents_to_index(self, file_name: str, metadata: dict= {}) -> bool:
         """Add documents to the index."""
         try:
+            document_main=[]
+
             bq_file_name=f"LLM-Test/{self.member_id}/{file_name}"
             gcs_file_path = f"gs://{self.bucket}/{bq_file_name}"
-            destination_file_name = f"LLM-Test/{self.member_id}/annotations/{file_name.replace('.pdf','.json')}"
+            pdf_path = get_file(bucket_name=bucket, file_path=bq_file_name, local_file_name=file_name.split('/')[-1])
+            info = pdfinfo_from_path(pdf_path)
+            total_pages = info["Pages"]
+            # total_pages = 10 
+            for i in range(1, total_pages + 1):
+                page_wise_extracted_data = self.ocr(pdf_path=pdf_path, page_number=i)
+                document_main.append(page_wise_extracted_data)
 
-            print("Performing OCR on retrieved images...")
-            document_main= ocr_from_images_dict(images_dict=images, bucket_name=bucket, destination_blob_name=destination_file_name)
+            print("Deleting the temp file used in OCR...")
+            # remove the downloaded file
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+            else:
+                print(f"The file {pdf_path} does not exist")
 
             doc_splits = split_documents(document_main=document_main, pdf_file_path=gcs_file_path, pat_name=patient_name, member_id=self.member_id)
 
@@ -159,7 +169,7 @@ class MemberRAG:
 
         except Exception as e:
             # Raise exception with context
-            raise RuntimeError(f"Failed to verify/create index for member_id={metadata.get('member_id')}: {e}")
+            raise RuntimeError(f"Failed to verify/create index for member_id={self.member_id}: {e}")
 
 
     def get_relevant_docs_and_metadata(self, question: str, k: int = DEFAULT_K, threshold: float = DEFAULT_THRESHOLD) -> Union[List[Dict[str, Any]], Exception]:
@@ -208,7 +218,7 @@ class MemberRAG:
                 chain_type="stuff",
                 retriever=ensemble,
             )
-            return rag_chain.run(question)
+            return rag_chain.invoke(question)
         except Exception as e:
             return RuntimeError(f"RetrievalQA failed: {e}")
         
@@ -287,12 +297,10 @@ icd_description =  {
 
 # Step 1: Initialize the RAG pipeline for the member
 rag = MemberRAG()
-
-# Step 2: Convert PDF to images
-images = rag.pdf_to_images(file_name="DEV_CCL summary (1).pdf")
+file_name = "Amelia_Harris_Redacted_EDited.pdf"
 
 # Step 3: Add the OCR-extracted content to the BigQuery index if not the pdf data is not indexed
-success = rag.add_documents_to_index(images=images, file_name="DEV_CCL summary (1).pdf")
+success = rag.add_documents_to_index(file_name=file_name)
 
 # Step 4: Ask a medical question
 question = "What medications has the patient been prescribed for hypophosphatemia?"
@@ -307,7 +315,6 @@ print("\nWould you suspect the condition today?")
 print(suspect_decision)
 
 # Call the get_relevant_docs_and_metadata method
-data1 = rag.get_relevant_docs_and_metadata(question=question, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
-print("\nRetrieved relavant dics")
+# data1 = rag.get_relevant_docs_and_metadata(question=question, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
 
 
